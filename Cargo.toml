@@ -1,0 +1,48 @@
+[package]
+name = "tgdata-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Telegram MTProto
+grammers-client  = { git = "https://github.com/Lonami/grammers", branch = "master" }
+grammers-session = { git = "https://github.com/Lonami/grammers", branch = "master" }
+grammers-mtsender = { git = "https://github.com/Lonami/grammers", branch = "master" }
+grammers-tl-types = { git = "https://github.com/Lonami/grammers", branch = "master" }
+grammers-crypto  = { git = "https://github.com/Lonami/grammers", branch = "master" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors
+anyhow = "1"
+
+# Crypto (for tdata parsing)
+pbkdf2  = { version = "0.12", features = ["simple"] }
+sha1    = "0.10"
+sha2    = "0.10"
+hmac    = "0.12"
+aes     = "0.8"
+md-5    = "0.10"
+
+# Big integers (for 2FA)
+num-bigint = "0.4"
+num-traits = "0.2"
+
+# Random (for 2FA salts)
+rand = "0.8"
+
+# JSON
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+hex       = "0.4"
+chrono    = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
