@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "tgdata-rs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -1564,6 +1564,7 @@ dependencies = [
  "sha1",
  "sha2",
  "tokio",
+ "tokio-socks",
 ]
 
 [[package]]
@@ -1612,6 +1613,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d4770b8024672c1101b3f6733eab95b18007dbe0847a8afe341fcf79e06043f"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

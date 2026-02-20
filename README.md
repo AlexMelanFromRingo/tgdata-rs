@@ -15,7 +15,21 @@ directly from the `tdata` session directory — without re-authentication.
 | `--import FILE` | Create a new `tdata` from a JSON export |
 | `--check-groups GROUP,...` | Resolve groups/channels: title, type, member count |
 | `--parse-group GROUP` | Scrape all members to CSV (supergroups only) |
-| `--output FILE` | CSV destination for `--parse-group` (default: `members.csv`) |
+| `--join-group GROUP` | Join a group/channel (username or `t.me/+HASH` invite link) |
+| `--leave-group GROUP` | Leave a group/channel |
+| `--check-username USER` | Check if a Telegram username is available (free to register) |
+| `--set-name "First\|Last"` | Set account first and/or last name |
+| `--set-bio TEXT` | Set account bio / about text |
+| `--ping` | Send "." to Saved Messages (session keep-alive) |
+| `--view-stories USER,...` | View and mark stories of given users as seen |
+| `--react LINK` | React to a message link (`t.me/username/123`) |
+| `--react-emoji EMOJI` | Emoji for `--react` (default: 👍) |
+| `--proxy URL` | SOCKS5 proxy: `socks5://[user:pass@]host:port` |
+| `--parse-messages GROUP` | Scrape messages to CSV |
+| `--msg-limit N` | Max messages for `--parse-messages` (default: 1000) |
+| `--invite-to GROUP` | Invite users to a channel |
+| `--invite-from FILE` | CSV source for `--invite-to` (from `--parse-group` output) |
+| `--output FILE` | CSV destination (default: `members.csv` / `messages.csv`) |
 | `--only N,N,...` | Process only the listed accounts (1-based) |
 | `--skip N,N,...` | Skip the listed accounts |
 | `--accounts N` | Process at most N accounts |
@@ -118,9 +132,91 @@ Uses all selected accounts in parallel — different accounts have different mut
 contacts, so using multiple accounts yields more visible phone numbers.
 Results are merged by `user_id`.
 
-**Output CSV columns:** `user_id`, `username`, `first_name`, `last_name`, `phone`, `is_bot`, `is_premium`
+**Output CSV columns:** `user_id`, `access_hash`, `username`, `first_name`, `last_name`, `phone`, `is_bot`, `is_premium`
 
 > Works for supergroups. Broadcast channels require admin rights.
+
+### Join / leave groups
+
+```
+tgdata-rs --path "C:\..." --join-group @somegroup
+tgdata-rs --path "C:\..." --join-group "t.me/+AbCdEfGhIjKl"
+tgdata-rs --path "C:\..." --leave-group @somegroup
+```
+
+### Check username availability
+
+```
+tgdata-rs --path "C:\..." --check-username coolname
+```
+
+```
+[12:00:01] [Поток 1] [79001234567] Аккаунт жив. Без спамблока. | @coolname: свободен ✓
+```
+
+### Set name and bio
+
+```
+tgdata-rs --path "C:\..." --set-name "Ivan|Petrov" --set-bio "Crypto trader"
+```
+
+```
+[12:00:01] [Поток 1] [79001234567] Аккаунт жив. Без спамблока. | имя, bio обновлено ✓
+```
+
+### Ping (session keep-alive)
+
+```
+tgdata-rs --path "C:\..." --ping
+```
+
+Sends a silent "." to Saved Messages on every account.
+
+### View stories
+
+```
+tgdata-rs --path "C:\..." --view-stories "@durov,@telegram"
+```
+
+```
+[12:00:01] [Поток 1] [79001234567] Аккаунт жив. | stories: просмотрено 3 шт.
+[12:00:01] [Поток 1] [79001234567]   ↳ @durov: 2 историй
+[12:00:01] [Поток 1] [79001234567]   ↳ @telegram: 1 историй
+```
+
+### React to a message
+
+```
+tgdata-rs --path "C:\..." --react "t.me/durov/123" --react-emoji "❤️"
+```
+
+### Using SOCKS5 proxy
+
+```
+tgdata-rs --path "C:\..." --proxy "socks5://user:pass@192.168.1.100:1080"
+tgdata-rs --path "C:\..." --proxy "socks5://192.168.1.100:1080"
+```
+
+Each account gets its own relay through the proxy.
+
+### Parse messages
+
+```
+tgdata-rs --path "C:\..." --parse-messages @somegroup --msg-limit 5000 --output messages.csv
+```
+
+**Output CSV columns:** `msg_id`, `date`, `from_id`, `text`, `reply_to_id`, `views`, `forwards`
+
+### Invite members to a channel
+
+First parse members from a source group, then invite them:
+
+```
+tgdata-rs --path "C:\..." --parse-group @sourcegroup --output members.csv
+tgdata-rs --path "C:\..." --invite-to @targetgroup --invite-from members.csv
+```
+
+The invite list is split evenly across all accounts to avoid per-account rate limits.
 
 ### Export sessions to JSON (no network)
 
