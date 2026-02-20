@@ -380,11 +380,34 @@ async fn resolve_group(client: &Client, raw: &str) -> GroupInfo {
         match chat {
             tl::enums::Chat::Channel(ch) => {
                 let kind = if ch.megagroup { "супергруппа" } else { "канал" };
+
+                // participants_count is absent in ResolveUsername for most channels —
+                // fetch it explicitly via GetFullChannel.
+                let members = match ch.participants_count {
+                    Some(n) if n > 0 => n,
+                    _ => {
+                        let input = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                            channel_id:  ch.id,
+                            access_hash: ch.access_hash.unwrap_or(0),
+                        });
+                        match client
+                            .invoke(&tl::functions::channels::GetFullChannel { channel: input })
+                            .await
+                        {
+                            Ok(tl::enums::messages::ChatFull::Full(f)) => match f.full_chat {
+                                tl::enums::ChatFull::ChannelFull(cf) => cf.participants_count.unwrap_or(0),
+                                _ => 0,
+                            },
+                            Err(_) => 0,
+                        }
+                    }
+                };
+
                 return GroupInfo {
                     input: raw.to_string(),
                     title: ch.title.clone(),
                     kind,
-                    members: ch.participants_count.unwrap_or(0),
+                    members,
                     error: None,
                 };
             }
