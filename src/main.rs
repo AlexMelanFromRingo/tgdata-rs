@@ -4,6 +4,8 @@ mod telegram;
 use anyhow::{anyhow, Result};
 use chrono::Local;
 use clap::Parser;
+use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -69,6 +71,18 @@ struct Cli {
     #[arg(long, value_name = "N,N,...", value_delimiter = ',')]
     skip: Vec<usize>,
 
+    /// Проверить доступность групп/каналов (через запятую: --check-groups @durov,t.me/telegram)
+    #[arg(long, value_name = "GROUP,GROUP,...", value_delimiter = ',')]
+    check_groups: Vec<String>,
+
+    /// Спарсить участников группы/канала (супергруппы)
+    #[arg(long, value_name = "GROUP")]
+    parse_group: Option<String>,
+
+    /// Куда сохранить CSV при --parse-group (default: members.csv)
+    #[arg(long, value_name = "FILE", default_value = "members.csv")]
+    output: String,
+
     /// Число параллельных потоков (default: 5)
     #[arg(long, value_name = "N", default_value_t = 5)]
     threads: usize,
@@ -124,8 +138,10 @@ async fn process_account(
     terminate:       bool,
     password:        Option<String>,
     remove_password: Option<String>,
+    check_groups:    Vec<String>,
+    parse_group:     Option<String>,
     print_lock:      PrintLock,
-) {
+) -> Vec<telegram::MemberInfo> {
     let _permit = semaphore.acquire().await.unwrap();
 
     let phone = format!("акк{}", info.index + 1);
@@ -140,7 +156,7 @@ async fn process_account(
             log(&print_lock, thread, &phone,
                 &format!("Ошибка подключения: {}", e), RED).await;
             results.lock().await.errors += 1;
-            return;
+            return vec![];
         }
     };
 
@@ -164,12 +180,12 @@ async fn process_account(
             } else if msg.contains("USER_DEACTIVATED_BAN") {
                 log(&print_lock, thread, &phone, "Аккаунт ЗАБАНЕН", RED).await;
                 results.lock().await.banned += 1;
-                return;
+                return vec![];
             } else {
                 log(&print_lock, thread, &phone, &format!("Ошибка: {}", e), RED).await;
             }
             results.lock().await.errors += 1;
-            return;
+            return vec![];
         }
     };
 
@@ -181,7 +197,7 @@ async fn process_account(
                 &format!("Ошибка спам-проверки: {}", e), RED).await;
             telegram::disconnect(client, pool_task);
             results.lock().await.errors += 1;
-            return;
+            return vec![];
         }
     };
 
@@ -189,7 +205,7 @@ async fn process_account(
         log(&print_lock, thread, &display_phone, "СПАМБЛОК!", RED).await;
         telegram::disconnect(client, pool_task);
         results.lock().await.spam += 1;
-        return;
+        return vec![];
     }
 
     // ── Clean account ──────────────────────────────────────────────────────
@@ -232,9 +248,68 @@ async fn process_account(
         }
     }
 
+    // ── Check groups ───────────────────────────────────────────────────────
+    if !check_groups.is_empty() {
+        let infos = telegram::check_groups(&client, &check_groups).await;
+        log(&print_lock, thread, &display_phone,
+            &format!("группы ({}):", infos.len()), GREEN).await;
+        for g in &infos {
+            let line = if let Some(ref err) = g.error {
+                format!("  ↳ {} — недоступна ✗ ({})", g.input, err)
+            } else {
+                format!("  ↳ {} — «{}» ({} уч.) [{}] ✓",
+                    g.input, g.title, g.members, g.kind)
+            };
+            log(&print_lock, thread, &display_phone, &line, GRAY).await;
+        }
+    }
+
+    // ── Parse group ────────────────────────────────────────────────────────
+    let mut parsed = vec![];
+    if let Some(ref group) = parse_group {
+        log(&print_lock, thread, &display_phone,
+            &format!("парсинг {}...", group), GRAY).await;
+        match telegram::parse_group_members(&client, group).await {
+            Ok((members, total)) => {
+                parts.push(format!("спарсено {}/{}", members.len(), total));
+                parsed = members;
+            }
+            Err(e) => parts.push(format!("парсинг: {}", e)),
+        }
+    }
+
     log(&print_lock, thread, &display_phone, &parts.join(" | "), GREEN).await;
     telegram::disconnect(client, pool_task);
     results.lock().await.clean += 1;
+    parsed
+}
+
+fn escape_csv(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn write_members_csv(path: &str, members: &[telegram::MemberInfo]) -> Result<()> {
+    let file = std::fs::File::create(path)
+        .map_err(|e| anyhow!("Не удалось создать {}: {}", path, e))?;
+    let mut w = std::io::BufWriter::new(file);
+    writeln!(w, "user_id,username,first_name,last_name,phone,is_bot,is_premium")?;
+    for m in members {
+        writeln!(
+            w, "{},{},{},{},{},{},{}",
+            m.user_id,
+            escape_csv(m.username.as_deref().unwrap_or("")),
+            escape_csv(&m.first_name),
+            escape_csv(m.last_name.as_deref().unwrap_or("")),
+            m.phone.as_deref().unwrap_or(""),
+            m.is_bot,
+            m.is_premium,
+        )?;
+    }
+    Ok(())
 }
 
 fn extract_phone_from_users(users: &[grammers_tl_types::enums::User]) -> Option<String> {
@@ -355,6 +430,12 @@ async fn main() -> Result<()> {
     if cli.remove_password.is_some() {
         println!("[{}] Облачный пароль будет снят", ts());
     }
+    if !cli.check_groups.is_empty() {
+        println!("[{}] Проверка групп: {}", ts(), cli.check_groups.join(", "));
+    }
+    if let Some(ref g) = cli.parse_group {
+        println!("[{}] Парсинг участников: {} → {}", ts(), g, cli.output);
+    }
     println!();
 
     // ── Concurrent processing ──────────────────────────────────────────────
@@ -372,15 +453,48 @@ async fn main() -> Result<()> {
         let terminate       = cli.terminate_sessions;
         let password        = cli.set_password.clone();
         let remove_password = cli.remove_password.clone();
+        let check_groups    = cli.check_groups.clone();
+        let parse_group     = cli.parse_group.clone();
 
         let task = tokio::spawn(process_account(
-            thread, account, sem, res, terminate, password, remove_password, plock,
+            thread, account, sem, res, terminate, password, remove_password,
+            check_groups, parse_group, plock,
         ));
         tasks.push(task);
     }
 
+    // ── Collect parsed members from all accounts ───────────────────────────
+    let mut all_members: HashMap<i64, telegram::MemberInfo> = HashMap::new();
     for t in tasks {
-        let _ = t.await;
+        if let Ok(members) = t.await {
+            for m in members {
+                let entry = all_members.entry(m.user_id);
+                match entry {
+                    std::collections::hash_map::Entry::Vacant(e) => { e.insert(m); }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        if e.get().phone.is_none() && m.phone.is_some() {
+                            e.insert(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Write CSV if parse_group was used ──────────────────────────────────
+    if cli.parse_group.is_some() && !all_members.is_empty() {
+        let mut sorted: Vec<_> = all_members.into_values().collect();
+        sorted.sort_by_key(|m| m.user_id);
+        let with_phone = sorted.iter().filter(|m| m.phone.is_some()).count();
+        match write_members_csv(&cli.output, &sorted) {
+            Ok(()) => println!(
+                "[{}] ✓ Сохранено {} участников (с телефонами: {}) → {}",
+                ts(), sorted.len(), with_phone, cli.output
+            ),
+            Err(e) => eprintln!("[{}] ❌ Ошибка записи CSV: {}", ts(), e),
+        }
+    } else if cli.parse_group.is_some() {
+        eprintln!("[{}] ⚠ Не удалось получить ни одного участника", ts());
     }
 
     // ── Summary ────────────────────────────────────────────────────────────

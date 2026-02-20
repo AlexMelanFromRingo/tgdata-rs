@@ -5,6 +5,7 @@
 /// 2. Run SenderPool + Client on a tokio task.
 /// 3. Perform operations (spam check, sessions, 2FA).
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
@@ -336,4 +337,241 @@ fn pad_to_256(data: &[u8]) -> [u8; 256] {
     let start = out.len().saturating_sub(data.len());
     out[start..].copy_from_slice(&data[data.len().saturating_sub(256)..]);
     out
+}
+
+// ─── Group check ──────────────────────────────────────────────────────────────
+
+pub struct GroupInfo {
+    pub input:   String,
+    pub title:   String,
+    pub kind:    &'static str, // "канал" | "супергруппа" | "группа"
+    pub members: i32,
+    pub error:   Option<String>,
+}
+
+/// Resolve and describe each group/channel.
+/// Never fails: errors are stored in GroupInfo::error.
+pub async fn check_groups(client: &Client, groups: &[String]) -> Vec<GroupInfo> {
+    let mut out = Vec::with_capacity(groups.len());
+    for raw in groups {
+        out.push(resolve_group(client, raw).await);
+    }
+    out
+}
+
+async fn resolve_group(client: &Client, raw: &str) -> GroupInfo {
+    let username = normalize_username(raw);
+    let resolved = client
+        .invoke(&tl::functions::contacts::ResolveUsername { username, referer: None })
+        .await;
+
+    let r = match resolved {
+        Ok(tl::enums::contacts::ResolvedPeer::Peer(r)) => r,
+        Err(e) => {
+            return GroupInfo {
+                input: raw.to_string(), title: String::new(),
+                kind: "?", members: 0,
+                error: Some(rpc_name(&e)),
+            };
+        }
+    };
+
+    for chat in &r.chats {
+        match chat {
+            tl::enums::Chat::Channel(ch) => {
+                let kind = if ch.megagroup { "супергруппа" } else { "канал" };
+                return GroupInfo {
+                    input: raw.to_string(),
+                    title: ch.title.clone(),
+                    kind,
+                    members: ch.participants_count.unwrap_or(0),
+                    error: None,
+                };
+            }
+            tl::enums::Chat::Chat(ch) => {
+                return GroupInfo {
+                    input: raw.to_string(),
+                    title: ch.title.clone(),
+                    kind: "группа",
+                    members: ch.participants_count,
+                    error: None,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    GroupInfo {
+        input: raw.to_string(), title: String::new(),
+        kind: "?", members: 0,
+        error: Some("не удалось получить информацию".to_string()),
+    }
+}
+
+fn normalize_username(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("t.me/")
+        .trim_start_matches('@')
+        .to_string()
+}
+
+fn rpc_name(e: &grammers_mtsender::InvocationError) -> String {
+    match e {
+        InvocationError::Rpc(r) => r.name.clone(),
+        other => other.to_string(),
+    }
+}
+
+// ─── Group parser ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberInfo {
+    pub user_id:    i64,
+    pub username:   Option<String>,
+    pub first_name: String,
+    pub last_name:  Option<String>,
+    pub phone:      Option<String>,
+    pub is_bot:     bool,
+    pub is_premium: bool,
+}
+
+/// Parse all members of a supergroup/channel.
+/// Returns (members, total_declared_by_server).
+/// Caller should print progress before/after.
+pub async fn parse_group_members(
+    client: &Client,
+    group:  &str,
+) -> Result<(Vec<MemberInfo>, i32)> {
+    let username = normalize_username(group);
+
+    let resolved = client
+        .invoke(&tl::functions::contacts::ResolveUsername { username, referer: None })
+        .await
+        .map_err(|e| anyhow!("ResolveUsername: {}", rpc_name(&e)))?;
+
+    let r = match resolved {
+        tl::enums::contacts::ResolvedPeer::Peer(r) => r,
+    };
+
+    let input_channel = peer_to_input_channel(&r.peer, &r.chats)?;
+
+    let mut members: HashMap<i64, MemberInfo> = HashMap::new();
+    let mut offset = 0i32;
+    let mut total  = 0i32;
+
+    loop {
+        let res = client
+            .invoke(&tl::functions::channels::GetParticipants {
+                channel: input_channel.clone(),
+                filter: tl::enums::ChannelParticipantsFilter::ChannelParticipantsRecent,
+                offset,
+                limit: 200,
+                hash: 0,
+            })
+            .await;
+
+        let batch = match res {
+            Ok(tl::enums::channels::ChannelParticipants::Participants(p)) => {
+                total = p.count;
+                p
+            }
+            Ok(tl::enums::channels::ChannelParticipants::NotModified) => break,
+            Err(InvocationError::Rpc(ref e)) if e.name == "FLOOD_WAIT" => {
+                let secs = e.value.unwrap_or(60) as u64;
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs + 1)).await;
+                continue;
+            }
+            Err(e) => return Err(anyhow!("GetParticipants: {}", e)),
+        };
+
+        if batch.participants.is_empty() {
+            break;
+        }
+
+        let users_map: HashMap<i64, &tl::types::User> = batch
+            .users
+            .iter()
+            .filter_map(|u| match u {
+                tl::enums::User::User(u) => Some((u.id, u)),
+                _ => None,
+            })
+            .collect();
+
+        let batch_len = batch.participants.len() as i32;
+
+        for p in &batch.participants {
+            if let Some(uid) = participant_uid(p) {
+                if let Some(user) = users_map.get(&uid) {
+                    let info = user_to_member(*user);
+                    let entry = members.entry(uid).or_insert_with(|| info.clone());
+                    // prefer entry with phone number
+                    if entry.phone.is_none() && info.phone.is_some() {
+                        *entry = info;
+                    }
+                }
+            }
+        }
+
+        offset += batch_len;
+        if offset >= total {
+            break;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+    }
+
+    let list: Vec<MemberInfo> = members.into_values().collect();
+    Ok((list, total))
+}
+
+fn peer_to_input_channel(
+    peer:  &tl::enums::Peer,
+    chats: &[tl::enums::Chat],
+) -> Result<tl::enums::InputChannel> {
+    let channel_id = match peer {
+        tl::enums::Peer::Channel(c) => c.channel_id,
+        tl::enums::Peer::Chat(_) => {
+            // Regular group — GetParticipants not supported; caller should use GetFullChat
+            return Err(anyhow!("Обычные группы не поддерживаются для парсинга (нужна супергруппа)"));
+        }
+        tl::enums::Peer::User(_) => return Err(anyhow!("Это пользователь, а не группа")),
+    };
+
+    for chat in chats {
+        if let tl::enums::Chat::Channel(ch) = chat {
+            if ch.id == channel_id {
+                return Ok(tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id,
+                    access_hash: ch.access_hash.unwrap_or(0),
+                }));
+            }
+        }
+    }
+
+    Err(anyhow!("Канал {} не найден в resolved chats", channel_id))
+}
+
+fn participant_uid(p: &tl::enums::ChannelParticipant) -> Option<i64> {
+    match p {
+        tl::enums::ChannelParticipant::Participant(x) => Some(x.user_id),
+        tl::enums::ChannelParticipant::ParticipantSelf(x) => Some(x.user_id),
+        tl::enums::ChannelParticipant::Admin(x)       => Some(x.user_id),
+        tl::enums::ChannelParticipant::Creator(x)     => Some(x.user_id),
+        tl::enums::ChannelParticipant::Banned(_)      => None,
+        tl::enums::ChannelParticipant::Left(_)        => None,
+    }
+}
+
+fn user_to_member(u: &tl::types::User) -> MemberInfo {
+    MemberInfo {
+        user_id:    u.id,
+        username:   u.username.clone(),
+        first_name: u.first_name.clone().unwrap_or_default(),
+        last_name:  u.last_name.clone(),
+        phone:      u.phone.clone(),
+        is_bot:     u.bot,
+        is_premium: u.premium,
+    }
 }
