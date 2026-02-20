@@ -13,6 +13,9 @@ directly from the `tdata` session directory — without re-authentication.
 | `--remove-password PASS` | Remove an existing cloud 2FA password |
 | `--export FILE` | Dump auth keys to JSON (offline, no network required) |
 | `--import FILE` | Create a new `tdata` from a JSON export |
+| `--check-groups GROUP,...` | Resolve groups/channels: title, type, member count |
+| `--parse-group GROUP` | Scrape all members to CSV (supergroups only) |
+| `--output FILE` | CSV destination for `--parse-group` (default: `members.csv`) |
 | `--only N,N,...` | Process only the listed accounts (1-based) |
 | `--skip N,N,...` | Skip the listed accounts |
 | `--accounts N` | Process at most N accounts |
@@ -83,6 +86,41 @@ tgdata-rs --path "C:\..." --set-password "MySecretPass123!"
 ```
 tgdata-rs --path "C:\..." --remove-password "MySecretPass123!"
 ```
+
+### Check groups / channels
+
+```
+tgdata-rs --path "C:\..." --check-groups "@durov,t.me/telegram,@somegroup"
+```
+
+```
+[12:00:01] [79001234567] группы (3):
+[12:00:01] [79001234567]   ↳ @durov — «Pavel Durov» (10 583 524 уч.) [канал] ✓
+[12:00:01] [79001234567]   ↳ @telegram — «Telegram News» (11 385 781 уч.) [канал] ✓
+[12:00:01] [79001234567]   ↳ @somegroup — «Some Group» (1 204 уч.) [супергруппа] ✓
+```
+
+Member count is fetched via `channels.getFullChannel` for accurate results.
+
+### Parse group members
+
+```
+tgdata-rs --path "C:\..." --parse-group @somegroup --output members.csv
+```
+
+```
+[12:00:01] [79001234567] парсинг @somegroup...
+[12:00:30] [79001234567] Аккаунт жив. | спарсено 1198/1200
+✓ Сохранено 1200 участников (с телефонами: 43) → members.csv
+```
+
+Uses all selected accounts in parallel — different accounts have different mutual
+contacts, so using multiple accounts yields more visible phone numbers.
+Results are merged by `user_id`.
+
+**Output CSV columns:** `user_id`, `username`, `first_name`, `last_name`, `phone`, `is_bot`, `is_premium`
+
+> Works for supergroups. Broadcast channels require admin rights.
 
 ### Export sessions to JSON (no network)
 
