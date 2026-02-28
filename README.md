@@ -27,6 +27,11 @@ directly from the `tdata` session directory — without re-authentication.
 | `--proxy URL` | SOCKS5 proxy: `socks5://[user:pass@]host:port` |
 | `--parse-messages GROUP` | Scrape messages to CSV |
 | `--msg-limit N` | Max messages for `--parse-messages` (default: 1000) |
+| `--list-joined-channels` | List channels/supergroups available in one selected account |
+| `--dump-channel SOURCE` | Full dump (text + media) from channel source (`@`, `t.me/...`, invite, or `joined:N`) |
+| `--dump-dir DIR` | Output directory for `--dump-channel` (default: `channel_dump`) |
+| `--dump-limit N` | Message limit for `--dump-channel` (`0` = no limit) |
+| `--dump-account N` | Account index (1-based) used for `--dump-channel` and `--list-joined-channels` |
 | `--invite-to GROUP` | Invite users to a channel |
 | `--invite-from FILE` | CSV source for `--invite-to` (from `--parse-group` output) |
 | `--output FILE` | CSV destination (default: `members.csv` / `messages.csv`) |
@@ -206,6 +211,31 @@ tgdata-rs --path "C:\..." --parse-messages @somegroup --msg-limit 5000 --output 
 ```
 
 **Output CSV columns:** `msg_id`, `date`, `from_id`, `text`, `reply_to_id`, `views`, `forwards`
+
+### Full channel dump (text + media)
+
+Pick the account explicitly with `--dump-account`:
+
+```bash
+# 1) Show channels available in account #2
+tgdata-rs --path "C:\..." --dump-account 2 --list-joined-channels
+
+# 2) Dump by joined index from previous list
+tgdata-rs --path "C:\..." --dump-account 2 --dump-channel joined:3 --dump-dir channel_dump
+
+# 3) Dump by public username/link
+tgdata-rs --path "C:\..." --dump-account 2 --dump-channel @telegram --dump-limit 10000
+tgdata-rs --path "C:\..." --dump-account 2 --dump-channel "t.me/telegram"
+
+# 4) Dump by invite link (tool joins first if needed)
+tgdata-rs --path "C:\..." --dump-account 2 --dump-channel "t.me/+AbCdEfGhIjKl"
+```
+
+Output files:
+- `channel_dump/messages.csv`
+- `channel_dump/media/*`
+
+**Output CSV columns:** `msg_id`, `date`, `from_id`, `text`, `reply_to_id`, `views`, `forwards`, `media_kind`, `media_file`
 
 ### Invite members to a channel
 
